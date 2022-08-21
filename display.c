@@ -44,13 +44,14 @@ float temperature(uint16_t adc) {
   return t;
 }
 void pixel(uint16_t x, uint16_t y, uint16_t state) {
-  uint16_t yy = y / 8;
-  uint16_t yyy = y % 8;
-  uint16_t segment = yy * 128 + x;
+  x = 63 - x;
+  uint16_t xx = x / 8;
+  uint16_t xxx = x % 8;
+  uint16_t segment = xx * 128 + y;
   if (state) {
-    vram[segment] |= 1 << yyy;
+    vram[segment] |= 1 << xxx;
   } else {
-    vram[segment] &= ~(1 << yyy);
+    vram[segment] &= ~(1 << xxx);
   }
 }
 
@@ -212,41 +213,22 @@ int main() {
   sleep_ms(10);
   gpio_put(PIN_DISPLAY_CS, 1);
 
-  for (int n = 0; n < 128; n++) pixel(n, 56, 1);
-  for (int n = 0; n < 128; n++) pixel(n, 63, 1);
-  for (int n = 57; n < 64; n++) pixel(0, n, 1);
-  for (int n = 57; n < 64; n++) pixel(127, n, 1);
+  print_string(0, 0, "Min:3.91");
+  print_string(0, 10, "Max:3.94");
+  print_string(0, 25, "Inv:100`");
+  print_string(0, 35, "Mot:100`");
+  print_string(0, 45, "Bat:100`");
 
   while (1) {
-    CAN_receive(0);
-    CAN_receive(1);
+    for (int addr = 0; addr < 1024; addr += 1) {
+      CAN_receive(0);
+      CAN_receive(1);
 
-    for (int i = 58; i < 62; i++)
-      for (int j = 2; j < 126; j++)
-        if (cell_percent >= j)
-          pixel(j, i, 1);
-        else
-          pixel(j, i, 0);
-
-    char str[128];
-    sprintf(str, "  Min     Max");
-    print_string(0, 0, str);
-    sprintf(str, "  %.02f    %.02f", cell_min, cell_max);
-    print_string(0, 8, str);
-
-    sprintf(str, "Inv  Mot  Batt");
-    print_string(8, 20, str);
-    sprintf(str, "%i`  ", temp_inv);
-    print_string(8, 28, str);
-    sprintf(str, "%i`  ", temp_mot);
-    print_string(48, 28, str);
-    sprintf(str, "%i`  ", temp_batt);
-    print_string(88, 28, str);
-
-    gpio_put(PIN_DISPLAY_DC, 1);
-    gpio_put(PIN_DISPLAY_CS, 0);
-    spi_write_blocking(SPI_PORT, vram, 128 * 8);
-    gpio_put(PIN_DISPLAY_CS, 1);
+      gpio_put(PIN_DISPLAY_DC, 1);
+      gpio_put(PIN_DISPLAY_CS, 0);
+      spi_write_blocking(SPI_PORT, vram + addr, 1);
+      gpio_put(PIN_DISPLAY_CS, 1);
+    }
   }
   return 0;
 }
