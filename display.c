@@ -29,13 +29,7 @@
 #define SPI_PORT spi0
 
 uint8_t vram[128 * 8];
-
-float cell_max;
-float cell_min;
-int32_t cell_percent;
-uint16_t temp_inv;
-uint16_t temp_mot;
-uint16_t temp_batt;
+int32_t current;
 
 float temperature(uint16_t adc) {
   float r = 0.0000000347363427499292f * adc * adc - 0.001025770762903f * adc +
@@ -43,15 +37,17 @@ float temperature(uint16_t adc) {
   float t = log(r) * -30.5280964239816f + 95.6841501312447f;
   return t;
 }
+
 void pixel(uint16_t x, uint16_t y, uint16_t state) {
-  x = 63 - x;
-  uint16_t xx = x / 8;
-  uint16_t xxx = x % 8;
-  uint16_t segment = xx * 128 + y;
+  if (x > 127) return;
+  if (y > 63) return;
+  uint16_t yy = y / 8;
+  uint16_t yyy = y % 8;
+  uint16_t segment = yy * 128 + x;
   if (state) {
-    vram[segment] |= 1 << xxx;
+    vram[segment] |= 1 << yyy;
   } else {
-    vram[segment] &= ~(1 << xxx);
+    vram[segment] &= ~(1 << yyy);
   }
 }
 
@@ -60,11 +56,12 @@ void print_char(uint16_t x, uint16_t y, uint16_t character) {
   for (uint16_t n = 0; n < 64; n++) {
     uint16_t xx = x + (n % 8);
     uint16_t yy = y + (n / 8);
+    if (xx > 103) return;
     pixel(xx, yy, font8[(character * 8 + (n / 8))] & (1 << (7 - n % 8)));
   }
 }
 
-void print_string(uint16_t x, uint16_t y, uint8_t* character) {
+void print_string(uint16_t x, uint16_t y, uint8_t *character) {
   while (*character) {
     print_char(x, y, *character++);
     x += 8;
@@ -109,63 +106,97 @@ void CAN_configure() {
   CAN_reg_write(REG_CNF2, 0xf0);
   CAN_reg_write(REG_CNF3, 0x86);
 
-  // Enable Filters
-  CAN_reg_write(REG_RXBnCTRL(0), 0);  // Enable filters, no rollover
-  CAN_reg_write(REG_RXBnCTRL(1), 0);
-  // Set masks RXM0 and RXM1 to exact match (0x7FF)
-  for (int n = 0; n < 2; n++) {
-    uint32_t mask = 0x7FF;
-    CAN_reg_write(REG_RXMnSIDH(n), mask >> 3);
-    CAN_reg_write(REG_RXMnSIDL(n), mask << 5);
-    CAN_reg_write(REG_RXMnEID8(n), 0);
-    CAN_reg_write(REG_RXMnEID0(n), 0);
-  }
-  // Set up filters RXF0 and RFX2 to match 2 addresses
-  uint32_t addr = 0x014;
-  CAN_reg_write(REG_RXFnSIDH(0), addr >> 3);
-  CAN_reg_write(REG_RXFnSIDL(0), addr << 5);
-  CAN_reg_write(REG_RXFnEID8(0), 0);
-  CAN_reg_write(REG_RXFnEID0(0), 0);
-
-  addr = 0x4F1;
-  CAN_reg_write(REG_RXFnSIDH(2), addr >> 3);
-  CAN_reg_write(REG_RXFnSIDL(2), addr << 5);
-  CAN_reg_write(REG_RXFnEID8(2), 0);
-  CAN_reg_write(REG_RXFnEID0(3), 0);
+  // Disable filters, enable rollover
+  CAN_reg_write(REG_RXBnCTRL(0), 0x64);
+  CAN_reg_write(REG_RXBnCTRL(1), 0x60);
 
   // Set normal operation mode
   CAN_reg_write(REG_CANCTRL, MODE_NORMAL);
 }
 
-void CAN_receive(uint8_t n) {
-  uint8_t intf = CAN_reg_read(REG_CANINTF);
-
-  if (intf & FLAG_RXnIF(n) == 0) {
-    return;
+void CAN_process(uint32_t id, uint8_t *data) {
+  uint8_t buf[128];
+  if (id == 0x4F1) {
+    // Cell minimum
+    uint16_t cell_max_i = (data[0] << 8) | data[1];
+    float cell_max = (float)cell_max_i / 13107.0f;
+    // Cell maximum
+    uint16_t cell_min_i = (data[2] << 8) | data[3];
+    float cell_min = (float)cell_min_i / 13107.0f;
+    // Battery max temperature
+    uint16_t temp_batt_i = (data[4] << 8) | data[5];
+    float temp_batt = temperature(temp_batt_i);
+    // Print to screen
+    sprintf(buf, "Min Cell %.2f  ", cell_min);
+    print_string(0, 0, buf);
+    sprintf(buf, "Max Cell %.2f  ", cell_max);
+    print_string(0, 10, buf);
+    sprintf(buf, "Battery  %.0f`  ", temp_batt);
+    print_string(0, 56, buf);
+    if (current > -20000 && current < 20000) {
+      float soc = (float)cell_min_i - 44564.f;
+      soc /= 9174.9;
+      soc *= 100;
+      if (soc < 0) soc = 0;
+      if (soc > 100) soc = 100;
+      sprintf(buf, "Charge   %.0f%%  ", soc);
+      print_string(0, 23, buf);
+    }
   }
-
-  if (n) {
-    uint16_t cell_max_i = CAN_reg_read(REG_RXBnD0(n) + 0) << 8;
-    cell_max_i |= CAN_reg_read(REG_RXBnD0(n) + 1);
-    cell_max = (float)cell_max_i / 13107.0f;
-    uint16_t cell_min_i = CAN_reg_read(REG_RXBnD0(n) + 2) << 8;
-    cell_min_i |= CAN_reg_read(REG_RXBnD0(n) + 3);
-    cell_min = (float)cell_min_i / 13107.0f;
-    uint16_t temp_batt_i = CAN_reg_read(REG_RXBnD0(n) + 4) << 8;
-    temp_batt_i |= CAN_reg_read(REG_RXBnD0(n) + 5);
-    temp_batt = temperature(temp_batt_i);
-    // Calculate voltage as a % between 3.4V and 4.1V
-    cell_percent = ((int32_t)cell_min_i - 44564) * 124 / 9175;
-  } else {
-    temp_inv = CAN_reg_read(REG_RXBnD0(n) + 1) << 8;
-    temp_inv |= CAN_reg_read(REG_RXBnD0(n) + 0);
+  if (id == 0x14) {
+    // Inverter temperature
+    int16_t temp_inv = (data[1] << 8) | data[0];
     temp_inv >>= 5;
-    temp_mot = CAN_reg_read(REG_RXBnD0(n) + 5) << 8;
-    temp_mot |= CAN_reg_read(REG_RXBnD0(n) + 4);
+    // Motor temperature
+    int16_t temp_mot = (data[5] << 8) | data[4];
     temp_mot >>= 5;
+    // Print to screen
+    sprintf(buf, "Inverter %i`  ", temp_inv);
+    print_string(0, 36, buf);
+    sprintf(buf, "Motor    %i`  ", temp_mot);
+    print_string(0, 46, buf);
   }
+  if (id == 0x521) {
+    current = (data[2] << 24) | (data[3] << 16) | (data[4] << 8) | data[5];
+    // int32_t current_64 = -current / 7500;
+    // current_64 = 61 - current_64;
+    // for (int n = 2; n < 62; n++) {
+    //   if (current_64 < n) {
+    //     pixel(114, n, 1);
+    //     pixel(115, n, 1);
+    //     pixel(116, n, 1);
+    //     pixel(117, n, 1);
+    //   } else {
+    //     pixel(114, n, 0);
+    //     pixel(115, n, 0);
+    //     pixel(116, n, 0);
+    //     pixel(117, n, 0);
+    //   }
+    // }
+  }
+}
 
-  CAN_reg_modify(REG_CANINTF, FLAG_RXnIF(n), 0x00);
+void CAN_receive() {
+  uint8_t intf = CAN_reg_read(REG_CANINTF);
+  uint8_t data[8];
+  uint32_t id;
+
+  for (int n = 0; n < 2; n++) {
+    if (intf & FLAG_RXnIF(n)) {
+      id = (CAN_reg_read(REG_RXBnSIDH(n)) << 3) |
+           (CAN_reg_read(REG_RXBnSIDL(n)) >> 5);
+      data[0] = CAN_reg_read(REG_RXBnD0(n) + 0);
+      data[1] = CAN_reg_read(REG_RXBnD0(n) + 1);
+      data[2] = CAN_reg_read(REG_RXBnD0(n) + 2);
+      data[3] = CAN_reg_read(REG_RXBnD0(n) + 3);
+      data[4] = CAN_reg_read(REG_RXBnD0(n) + 4);
+      data[5] = CAN_reg_read(REG_RXBnD0(n) + 5);
+      data[6] = CAN_reg_read(REG_RXBnD0(n) + 6);
+      data[7] = CAN_reg_read(REG_RXBnD0(n) + 7);
+      CAN_reg_modify(REG_CANINTF, FLAG_RXnIF(n), 0x00);
+      CAN_process(id, data);
+    }
+  }
 }
 
 int main() {
@@ -190,17 +221,17 @@ int main() {
 
   gpio_put(PIN_CAN_CS, 1);
   gpio_put(PIN_DISPLAY_CS, 1);
+  gpio_put(PIN_DISPLAY_RESET, 1);
+  sleep_ms(50);
 
   CAN_reset();
   CAN_configure();
-  // gpio_set_irq_enabled_with_callback(PIN_CAN_INT, GPIO_IRQ_LEVEL_LOW, true,
-  //                                   &gpio_callback);
 
   // Reset display
   gpio_put(PIN_DISPLAY_RESET, 0);
-  sleep_ms(100);
+  sleep_ms(50);
   gpio_put(PIN_DISPLAY_RESET, 1);
-  sleep_ms(100);
+  sleep_ms(50);
 
   // Enable and configure display
   gpio_put(PIN_DISPLAY_DC, 0);
@@ -212,19 +243,29 @@ int main() {
   spi_write_blocking(SPI_PORT, (uint8_t[]){0x00}, 1);
   sleep_ms(10);
   gpio_put(PIN_DISPLAY_CS, 1);
+  gpio_put(PIN_DISPLAY_DC, 1);
 
-  print_string(0, 0, "Min:3.91");
-  print_string(0, 10, "Max:3.94");
-  print_string(0, 25, "Inv:100`");
-  print_string(0, 35, "Mot:100`");
-  print_string(0, 45, "Bat:100`");
+  // pixel(113, 0, 1);
+  // pixel(114, 0, 1);
+  // pixel(115, 0, 1);
+  // pixel(116, 0, 1);
+  // pixel(117, 0, 1);
+  // pixel(118, 0, 1);
+  // pixel(113, 63, 1);
+  // pixel(114, 63, 1);
+  // pixel(115, 63, 1);
+  // pixel(116, 63, 1);
+  // pixel(117, 63, 1);
+  // pixel(118, 63, 1);
+  // for (int n = 0; n < 64; n++) {
+  //   pixel(112, n, 1);
+  //   pixel(119, n, 1);
+  // }
 
   while (1) {
     for (int addr = 0; addr < 1024; addr += 1) {
-      CAN_receive(0);
-      CAN_receive(1);
+      CAN_receive();
 
-      gpio_put(PIN_DISPLAY_DC, 1);
       gpio_put(PIN_DISPLAY_CS, 0);
       spi_write_blocking(SPI_PORT, vram + addr, 1);
       gpio_put(PIN_DISPLAY_CS, 1);
