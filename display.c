@@ -32,8 +32,7 @@ uint8_t vram[128 * 8];
 int32_t current;
 
 float temperature(uint16_t adc) {
-  float r = 0.0000000347363427499292f * adc * adc - 0.001025770762903f * adc +
-            2.68235340614337f;
+  float r = 0.0000000347363427499292f * adc * adc - 0.001025770762903f * adc + 2.68235340614337f;
   float t = log(r) * -30.5280964239816f + 95.6841501312447f;
   return t;
 }
@@ -41,6 +40,9 @@ float temperature(uint16_t adc) {
 void pixel(uint16_t x, uint16_t y, uint16_t state) {
   if (x > 127) return;
   if (y > 63) return;
+  // Rotate 180 degres
+  x = 127 - x;
+  y = 63 - y;
   uint16_t yy = y / 8;
   uint16_t yyy = y % 8;
   uint16_t segment = yy * 128 + x;
@@ -56,7 +58,7 @@ void print_char(uint16_t x, uint16_t y, uint16_t character) {
   for (uint16_t n = 0; n < 64; n++) {
     uint16_t xx = x + (n % 8);
     uint16_t yy = y + (n / 8);
-    if (xx > 103) return;
+    if (xx > 127) return;
     pixel(xx, yy, font8[(character * 8 + (n / 8))] & (1 << (7 - n % 8)));
   }
 }
@@ -124,14 +126,17 @@ void CAN_process(uint32_t id, uint8_t *data) {
     uint16_t cell_min_i = (data[2] << 8) | data[3];
     float cell_min = (float)cell_min_i / 13107.0f;
     // Battery max temperature
-    uint16_t temp_batt_i = (data[4] << 8) | data[5];
-    float temp_batt = temperature(temp_batt_i);
+    uint16_t temp_batt_max_i = (data[4] << 8) | data[5];
+    float temp_batt_max = temperature(temp_batt_max_i);
+    // Battery min temperature
+    uint16_t temp_batt_min_i = (data[6] << 8) | data[7];
+    float temp_batt_min = temperature(temp_batt_min_i);
     // Print to screen
-    sprintf(buf, "Min Cell %.2f  ", cell_min);
+    sprintf(buf, "Min Cell %.2f    ", cell_min);
     print_string(0, 0, buf);
-    sprintf(buf, "Max Cell %.2f  ", cell_max);
+    sprintf(buf, "Max Cell %.2f    ", cell_max);
     print_string(0, 10, buf);
-    sprintf(buf, "Battery  %.0f`  ", temp_batt);
+    sprintf(buf, "Battery  %.0f` %.0f`  ", temp_batt_min, temp_batt_max);
     print_string(0, 56, buf);
     if (current > -20000 && current < 20000) {
       float soc = (float)cell_min_i - 44564.f;
@@ -151,9 +156,9 @@ void CAN_process(uint32_t id, uint8_t *data) {
     int16_t temp_mot = (data[5] << 8) | data[4];
     temp_mot >>= 5;
     // Print to screen
-    sprintf(buf, "Inverter %i`  ", temp_inv);
+    sprintf(buf, "Inverter %i`     ", temp_inv);
     print_string(0, 36, buf);
-    sprintf(buf, "Motor    %i`  ", temp_mot);
+    sprintf(buf, "Motor    %i`     ", temp_mot);
     print_string(0, 46, buf);
   }
   if (id == 0x521) {
@@ -183,8 +188,7 @@ void CAN_receive() {
 
   for (int n = 0; n < 2; n++) {
     if (intf & FLAG_RXnIF(n)) {
-      id = (CAN_reg_read(REG_RXBnSIDH(n)) << 3) |
-           (CAN_reg_read(REG_RXBnSIDL(n)) >> 5);
+      id = (CAN_reg_read(REG_RXBnSIDH(n)) << 3) | (CAN_reg_read(REG_RXBnSIDL(n)) >> 5);
       data[0] = CAN_reg_read(REG_RXBnD0(n) + 0);
       data[1] = CAN_reg_read(REG_RXBnD0(n) + 1);
       data[2] = CAN_reg_read(REG_RXBnD0(n) + 2);
@@ -261,6 +265,7 @@ int main() {
   //   pixel(112, n, 1);
   //   pixel(119, n, 1);
   // }
+  print_string(0, 0, "Waiting...");
 
   while (1) {
     for (int addr = 0; addr < 1024; addr += 1) {
